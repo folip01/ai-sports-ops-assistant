@@ -1,0 +1,5 @@
+node_modules
+.env
+stats.db
+stats.db-wal
+stats.db-shm
