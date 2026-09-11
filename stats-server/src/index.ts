@@ -3,6 +3,8 @@ import express from 'express';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { getRecentMatchesSchema, getRecentMatchesHandler } from './tools/getRecentMatches';
+import { createLogger } from './logger';
+const logger = createLogger('stats-server'); // or 'fpl-server' / 'gateway'
 
 const server = new McpServer({
     name: 'stats-server',
@@ -17,6 +19,9 @@ server.tool(
 );
 
 const app = express();
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'stats-server', timestamp: new Date().toISOString() });
+});
 app.use(express.json());
 
 app.post('/mcp', async (req, res) => {
@@ -34,5 +39,5 @@ app.post('/mcp', async (req, res) => {
 
 const PORT = 4001;
 app.listen(PORT, () => {
-    console.log(`Stats server running on http://localhost:${PORT}/mcp`);
+    logger.info(`Stats server running on http://localhost:${PORT}/mcp`);
 });
