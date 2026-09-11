@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>FPL Decision Assistant</title>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            max-width: 640px;
+            margin: 40px auto;
+            padding: 0 16px;
+            color: #222;
+        }
+
+        h1 {
+            font-size: 1.3rem;
+            margin-bottom: 4px;
+        }
+
+        p.subtitle {
+            color: #555;
+            margin-top: 0;
+            margin-bottom: 20px;
+            font-size: 0.95rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 60px;
+            padding: 8px;
+            font-size: 1rem;
+            border: 1px solid #999;
+            box-sizing: border-box;
+            font-family: inherit;
+        }
+
+        button {
+            margin-top: 10px;
+            padding: 6px 16px;
+            font-size: 0.95rem;
+            border: 1px solid #666;
+            background: #eee;
+            cursor: pointer;
+        }
+
+        button:hover:not(:disabled) {
+            background: #ddd;
+        }
+
+        button:disabled {
+            color: #999;
+            cursor: not-allowed;
+        }
+
+        #result {
+            margin-top: 20px;
+            padding: 12px;
+            border: 1px solid #ccc;
+            white-space: pre-wrap;
+            line-height: 1.4;
+            display: none;
+        }
+
+        #loading {
+            margin-top: 14px;
+            color: #555;
+            font-size: 0.9rem;
+            display: none;
+        }
+
+        #error {
+            margin-top: 14px;
+            color: #a00;
+            font-size: 0.9rem;
+            display: none;
+        }
+
+        .examples {
+            margin-top: 8px;
+            font-size: 0.85rem;
+            color: #555;
+        }
+
+        .examples button {
+            margin: 4px 6px 0 0;
+            padding: 3px 8px;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>FPL Decision Assistant</h1>
+    <p class="subtitle">Ask a Fantasy Premier League question. The agent checks player data and fixture difficulty
+        before answering.</p>
+
+    <label for="question">Question</label>
+    <textarea id="question" placeholder="Should I captain Haaland this gameweek?"></textarea>
+    <br>
+    <button id="askButton">Ask</button>
+
+    <div class="examples">
+        Example questions:
+        <button type="button" onclick="setExample('Should I captain Saka this gameweek?')">Should I captain
+            Saka?</button>
+        <button type="button" onclick="setExample('Is Haaland a good captain pick right now?')">Is Haaland a good
+            pick?</button>
+    </div>
+
+    <div id="loading">Loading, this can take up to 15 seconds...</div>
+    <div id="error"></div>
+    <div id="result"></div>
+
+    <script>
+        const AGENT_URL = 'http://localhost:4010/ask';
+
+        const questionEl = document.getElementById('question');
+        const buttonEl = document.getElementById('askButton');
+        const loadingEl = document.getElementById('loading');
+        const resultEl = document.getElementById('result');
+        const errorEl = document.getElementById('error');
+
+        function setExample(text) {
+            questionEl.value = text;
+        }
+
+        async function askAgent() {
+            const question = questionEl.value.trim();
+            if (!question) return;
+
+            buttonEl.disabled = true;
+            loadingEl.style.display = 'block';
+            resultEl.style.display = 'none';
+            errorEl.style.display = 'none';
+
+            try {
+                const res = await fetch(AGENT_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question }),
+                });
+
+                if (!res.ok) {
+                    throw new Error('The agent server returned an error.');
+                }
+
+                const data = await res.json();
+                resultEl.textContent = data.answer || 'No answer was returned.';
+                resultEl.style.display = 'block';
+            } catch (err) {
+                errorEl.textContent = 'Error: ' + err.message + ' Make sure stats-server, fpl-server, gateway, and agent are all running.';
+                errorEl.style.display = 'block';
+            } finally {
+                buttonEl.disabled = false;
+                loadingEl.style.display = 'none';
+            }
+        }
+
+        buttonEl.addEventListener('click', askAgent);
+    </script>
+
+</body>
+
+</html>

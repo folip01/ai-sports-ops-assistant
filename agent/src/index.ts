@@ -1,10 +1,13 @@
 import 'dotenv/config';
+import express from 'express';
 import { generateText, tool } from 'ai';
 import { groq } from '@ai-sdk/groq';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
+import { createLogger } from './logger';
 
+const logger = createLogger('agent');
 
 const GATEWAY_URL = 'http://localhost:4000/mcp';
 const GATEWAY_API_KEY = process.env.GATEWAY_API_KEY!;
@@ -65,7 +68,7 @@ async function buildToolsFromGateway(mcpClient: Client) {
     return tools;
 }
 
-async function askAgent(question: string) {
+async function askAgent(question: string): Promise<string> {
     const mcpClient = await connectToGateway();
     const tools = await buildToolsFromGateway(mcpClient);
 
@@ -73,25 +76,76 @@ async function askAgent(question: string) {
         model: groq('openai/gpt-oss-120b'),
         tools,
         stopWhen: ({ steps }) => steps.length >= MAX_STEPS,
+
         system:
             'You are an FPL (Fantasy Premier League) decision assistant. ' +
-            'Use the available tools to gather real data about players before answering. ' +
-            'Give a clear, reasoned recommendation, not just raw numbers.',
+            'Use the available tools when useful. ' +
+            'After using tools, you MUST answer the user directly. ' +
+            'Never finish after a tool call without giving a final answer. ' +
+            'Give a clear, reasoned response.',
+
         prompt: question,
     });
 
+    console.log('\n========== AGENT DEBUG ==========');
+    console.log('TEXT:', JSON.stringify(result.text));
+    console.log('FINISH REASON:', result.finishReason);
+    console.log('NUMBER OF STEPS:', result.steps.length);
+
+    result.steps.forEach((step, i) => {
+        console.log(`\n--- STEP ${i + 1} ---`);
+        console.log('TEXT:', JSON.stringify(step.text));
+        console.log('TOOL CALLS:', step.toolCalls);
+        console.log('TOOL RESULTS:', step.toolResults);
+    });
+
+    console.log('\n=================================\n');
+
     await mcpClient.close();
 
-    return result.text;
+    return result.text || 'The model did not produce a final answer.';
+
 }
 
-const question = process.argv.slice(2).join(' ') || 'Should I captain Haaland this gameweek?';
+const app = express();
+app.use(express.json());
 
-askAgent(question)
-    .then((answer) => {
-        console.log('\n--- Agent answer ---\n');
-        console.log(answer);
-    })
-    .catch((err) => {
-        console.error('Agent error:', err);
-    });
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+        res.sendStatus(200);
+        return;
+    }
+    next();
+});
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'agent', timestamp: new Date().toISOString() });
+});
+
+app.post('/ask', async (req, res) => {
+    const question = req.body?.question;
+
+    if (!question || typeof question !== 'string') {
+        res.status(400).json({ error: 'Missing "question" in request body' });
+        return;
+    }
+
+    logger.info('Received question', { question });
+
+    try {
+        const answer = await askAgent(question);
+        logger.info('Answered question', { question });
+        res.json({ answer });
+    } catch (err) {
+        logger.error('Agent failed to answer', { question, error: (err as Error).message });
+        res.status(500).json({ error: 'The agent could not answer right now. Please try again.' });
+    }
+});
+
+const PORT = 4010;
+app.listen(PORT, () => {
+    logger.info('Agent server started', { port: PORT });
+});
