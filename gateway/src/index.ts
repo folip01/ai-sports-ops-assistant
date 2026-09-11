@@ -7,6 +7,8 @@ import { callTool } from './mcpClient';
 import { buildZodShape } from './jsonSchemaToZod';
 import { authMiddleware } from './middleware/auth';
 import { rateLimitMiddleware } from './middleware/rateLimit';
+import { createLogger } from './logger';
+const logger = createLogger('gateway');
 
 const server = new McpServer({
     name: 'gateway',
@@ -38,6 +40,9 @@ async function registerAggregatedTools() {
 }
 
 const app = express();
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'gateway', timestamp: new Date().toISOString() });
+});
 app.use(express.json());
 
 app.post('/mcp', authMiddleware, rateLimitMiddleware, async (req, res) => {
@@ -57,6 +62,6 @@ const PORT = 4000;
 
 registerAggregatedTools().then(() => {
     app.listen(PORT, () => {
-        console.log(`Gateway running on http://localhost:${PORT}/mcp`);
+        logger.info(`Gateway running on http://localhost:${PORT}/mcp`);
     });
 });
