@@ -1,25 +1,39 @@
-# AI Sports Ops Assistant: FPL Decision Assistant
+# AI Sports Ops Assistant: An FPL Decision Agent Built on MCP
 
-An AI agent that helps answer real Fantasy Premier League (FPL) decisions, like *"should I captain Haaland this gameweek?"*, by synthesizing multiple sources of football data through an [MCP](https://modelcontextprotocol.io) (Model Context Protocol) gateway.
+**Ask it something like *"should I captain Haaland this gameweek?"* and it gives you a real, reasoned answer, backed by live data, not a guess.**
 
-## Why this project
+This is a working multi-service AI system: two independent data servers, a gateway that discovers and routes between them, and an LLM agent that decides on its own which tools to call and synthesizes the results, all wired together with [MCP](https://modelcontextprotocol.io) (Model Context Protocol), a standard new enough that most engineers haven't built a real system on it yet.
 
-Generic football stats lookup ("what were Arsenal's last 5 results") is a solved problem, a Google search or an app like LiveScore already answers it instantly. There's no real reason for an AI assistant to exist just to re-answer something one search already handles.
+## Why this exists
 
-FPL decisions are different. Answering "should I captain this player" genuinely requires combining several things that no single existing tool puts together automatically: how well the player's actually been playing (recent form), how hard their upcoming fixtures are, and whether they're even available to play. Real FPL players do this manually today, opening multiple tabs and cross-referencing them by hand, every gameweek.
+Anyone can build a chatbot that answers football trivia, that's a solved problem, Google already does it in the search snippet. This project deliberately targets something harder: a class of question that genuinely requires combining multiple, independently-sourced signals before it can be answered at all.
 
-This project builds an agent that does that synthesis for you, and in doing so, demonstrates both backend infrastructure design (service boundaries, caching, gateway routing, observability) and AI/LLM engineering (tool calling, multi-step agent orchestration) using a protocol, MCP, that's new enough that few engineers have hands-on production experience with it yet.
+*"Should I captain this player"* isn't a lookup, it's a synthesis of form, fixture difficulty, and availability, three things that live in different systems, that real Fantasy Premier League managers currently gather by hand, across multiple tabs, every single gameweek. Building an agent that does that synthesis automatically is a real demonstration of tool orchestration, not a toy example built to justify an architecture.
 
-## Status
+## What's actually running
 
-The core system is complete and working end to end.
+Four independent services, talking to each other over MCP and HTTP, each with a real reason to exist separately:
 
-- ✅ [Stats server](./stats-server/README.md) — real match history and form via football-data.org
-- ✅ [FPL server](./fpl-server/README.md) — player price/ownership/form/availability and fixture difficulty via the official FPL API
-- ✅ Gateway — aggregates tool discovery across both servers, routes calls, real Zod schema validation, auth, Redis-backed rate limiting (fails open if Redis is unavailable), graceful degradation if a tool server is down
-- ✅ Agent layer — LLM-powered (Groq) orchestration via the Vercel AI SDK, connects to the gateway as an MCP client, decides which tools to call, and reasons over the combined results into an actual recommendation
-- ✅ Plumbing — structured JSON logging, `/health` endpoints, and CI (GitHub Actions, type-checks all 4 services on every push and PR)
-- ⬜ Mini frontend — in progress
+| Service | Job | Why it's separate |
+|---|---|---|
+| **Stats server** | Real match history via football-data.org | Read-heavy, cacheable, no reason to share a deploy lifecycle with anything else |
+| **FPL server** | Player price/ownership/form/availability + fixture difficulty, via the official FPL API | Different data source, different caching strategy (whole-dataset, in-memory, hourly) |
+| **Gateway** | Discovers tools across both servers, merges them into one list, routes calls, handles auth + rate limiting | The single point every consumer talks to, so tool servers can change without breaking anything upstream |
+| **Agent** | LLM (via Groq + Vercel AI SDK) that decides which tools a question needs, calls them through the gateway, and reasons over the results | The only piece that understands *questions*, everything below it only understands *tools* |
+
+Plus a minimal frontend and a CI pipeline that type-checks all four services on every push.
+
+## Engineering decisions worth knowing about
+
+These are the calls that actually took judgment, not just implementation:
+
+- **Swapped data source mid-build (TheSportsDB → football-data.org) after hitting undocumented free-tier caps.** Rather than hack around silent 1-result limits, diagnosed the root cause and moved to a provider with a published, honest free tier, a real production instinct: don't build fragile workarounds around a vendor's undocumented behavior.
+- **Pivoted the entire product direction mid-build**, from "ask any football question" to an FPL decision assistant, after recognizing the original scope had no real use case (Google already answers "what were Arsenal's last 5 results" instantly). The pivot kept 100% of the existing architecture and most of the existing code; only the domain framing changed. That's a sign the architecture was sound, not a sign of a false start.
+- **Two tool servers, not one, and not three.** A squad-management server was designed, then deliberately cut, it solved an invented problem nobody has. A fixtures server was cut, then brought back once it had a real justification (demonstrating the gateway actually routing across multiple servers, not just passing through to one). Every service that exists earned its place.
+- **Different caching strategies per service, chosen deliberately, not defaulted.** SQLite for the stats server (survives restarts, matters because match history is expensive to refetch). Plain in-memory for the FPL server (one clean endpoint, no rate-limit pressure, a restart just costs one harmless refetch). Same author, two different, correct answers, not one pattern copy-pasted twice.
+- **The gateway fails open, not closed.** If Redis (rate limiting) goes down, requests are still served rather than the whole system going dark over a non-critical dependency, a deliberate resilience choice, not an oversight.
+- **Rebuilt a JSON-Schema-to-Zod converter from scratch** after an initial version silently discarded every tool's real input validation (defaulting everything to `z.any()`). Caught via schema-portability warnings in MCP Inspector, not guesswork, and fixed at the root rather than patched.
+- **Model provider is swappable in two lines.** The agent was built against Anthropic, then moved to Groq (a genuinely free tier with no billing setup) without touching the MCP client, the gateway, or either tool server, proof the LLM is a pluggable component, not load-bearing architecture.
 
 ## Architecture
 
@@ -36,51 +50,50 @@ User question
      └──▶ FPL server     (price, ownership, form, availability, fixture difficulty)
 ```
 
-Each tool server owns one narrow domain and knows nothing about the others. The gateway is the only thing that knows where each tool server lives. The agent only ever talks to the gateway, never to a tool server directly, so tool servers can be added, removed, or changed without the agent's code needing to change.
+The agent never talks to a tool server directly. It only knows the gateway exists. This means tool servers can be added, removed, or replaced without the agent's code changing at all, the entire point of building this on MCP instead of hand-wiring API calls.
 
-### Why two tool servers, not one
-
-A question like *"should I captain Haaland"* cannot be answered by either server alone. It needs the FPL server's form/availability data and its fixture difficulty, genuinely different information, sourced differently, combined by the agent into one answer. This is what makes the gateway's routing and the agent's orchestration real engineering, not just a pass-through to a single backend.
-
-### Model provider
-
-The agent layer uses Groq (currently `openai/gpt-oss-120b`, a tool-calling-capable model on Groq's free tier) via the Vercel AI SDK. The SDK is provider-agnostic by design, swapping to a different LLM provider is a two-line change (the import and the model string), nothing about the MCP/gateway/tool-server layers needs to change.
-
-## Example question this system is built to answer
+## See it work
 
 > "Should I captain Haaland this gameweek?"
 
-To answer this properly, the agent:
-1. Calls `get_player_info` to check Haaland's current form, ownership, and availability
-2. Calls `get_fixture_difficulty` to check how hard his upcoming fixture is
-3. Weighs both together into a reasoned recommendation, not just raw numbers back at the user
+The agent calls `get_player_info` (form: 8.0, ownership: 71%, availability: confirmed) and `get_fixture_difficulty` (upcoming opponent, FDR rating) through the gateway, then writes an actual recommendation, not a data dump, weighing form against fixture difficulty the way a real FPL manager would.
+
+## Status
+
+- ✅ Stats server, FPL server, gateway, agent layer: built, tested, working end to end
+- ✅ Plumbing: structured JSON logging, `/health` checks, CI (GitHub Actions, all 4 services)
+- ✅ Minimal frontend
+- ⬜ Deployment (in progress)
 
 ## Repo structure
 
 ```
 ai-sports-ops-assistant/
-  stats-server/     — MCP tool server: match history (football-data.org)
-  fpl-server/       — MCP tool server: FPL player & fixture data
-  gateway/          — MCP discovery aggregation, routing, auth, rate limiting
-  agent/            — LLM agent (Groq) that orchestrates tool calls via the gateway
-  .github/workflows/ — CI: type-checks all 4 services on every push and PR
+  stats-server/       — MCP tool server: match history (football-data.org)
+  fpl-server/         — MCP tool server: FPL player & fixture data
+  gateway/            — MCP discovery aggregation, routing, auth, rate limiting
+  agent/              — LLM agent (Groq) + API endpoint, orchestrates tool calls via the gateway
+  frontend/           — minimal UI calling the agent's /ask endpoint
+  .github/workflows/  — CI: type-checks all 4 services on every push and PR
 ```
 
 Each server has its own README with setup and testing instructions specific to that piece.
 
-## Running the full system locally
+## Running it locally
 
-Each piece runs as its own process. In four separate terminals:
+Four services, four terminals:
 
 ```bash
 cd stats-server && npm install && npm run dev   # http://localhost:4001/mcp
 cd fpl-server && npm install && npm run dev      # http://localhost:4002/mcp
 cd gateway && npm install && npm run dev         # http://localhost:4000/mcp
-cd agent && npm install && npm run dev           # runs one question end-to-end
+cd agent && npm install && npm run dev           # http://localhost:4010
 ```
 
-The gateway requires Redis running locally (used for rate limiting; if unavailable, rate limiting is skipped rather than blocking requests). The agent requires a free Groq API key ([console.groq.com/keys](https://console.groq.com/keys), no credit card needed).
+The gateway needs Redis running locally (rate limiting; fails open if unavailable). The agent needs a free Groq API key ([console.groq.com/keys](https://console.groq.com/keys), no card required).
+
+Then open `frontend/index.html` in a browser.
 
 ## Stack
 
-TypeScript, Express, `@modelcontextprotocol/sdk` (official MCP SDK), Zod, SQLite (`better-sqlite3`), Axios, Vercel AI SDK, Groq, Redis (`ioredis`), GitHub Actions. Built with stack diversity in mind alongside other portfolio projects, this one deliberately uses Express rather than a framework like NestJS used elsewhere.
+TypeScript, Express, `@modelcontextprotocol/sdk`, Zod, SQLite (`better-sqlite3`), Axios, Vercel AI SDK, Groq, Redis (`ioredis`), GitHub Actions. Deliberately built on Express rather than NestJS (used in another portfolio project) for stack diversity.
